@@ -55,33 +55,53 @@ class DocConverter:
 
     def _setup_logger(self):
         """配置日志记录器，日志文件与 Excel 文件同目录。"""
+        intended_log_path_for_error = "Unknown (error before path generation)"
         try:
-            # 日志文件直接放在 Excel 文件所在的目录
             log_dir = os.path.dirname(self.excel_path)
             excel_filename = os.path.splitext(os.path.basename(self.excel_path))[0]
-            # 日志文件名基于 Excel 文件名
             self.log_path = os.path.join(log_dir, f"{excel_filename}_conversion.log")
-            # 确保目录存在 (虽然通常dirname会存在，但以防万一)
-            os.makedirs(log_dir, exist_ok=True)
+            intended_log_path_for_error = (
+                self.log_path
+            )  # Store for potential error message
 
+            # 确保目录存在
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            else:  # Handle case where excel path might be just a filename in current dir
+                pass
+
+            # 尝试设置日志
             self.logger = logger_config.setup_logging(self.log_path)
             if not self.logger:
-                raise RuntimeError("setup_logging returned None")
+                # setup_logging 内部应该处理错误，但以防万一它返回了 None
+                raise RuntimeError(
+                    "logger_config.setup_logging returned None without raising an exception."
+                )
+
+            self.logger.info(
+                f"Logger setup successful for: {self.log_path}"
+            )  # 添加成功日志
+
         except Exception as e:
+            # --- 增强错误日志 ---
+            # 使用 basicConfig 确保至少有控制台输出
             logging.basicConfig(
-                level=logging.ERROR, format="%(asctime)s - %(levelname)s - %(message)s"
+                level=logging.ERROR,
+                format="%(asctime)s - %(levelname)s - [%(name)s] - %(message)s",
             )
-            self.logger = logging.getLogger(__name__)
-            # 更新错误日志中的路径信息
-            intended_log_path = os.path.join(
-                os.path.dirname(self.excel_path),
-                f"{os.path.splitext(os.path.basename(self.excel_path))[0]}_conversion.log",
+            # 获取一个备用 logger 实例
+            fallback_logger = logging.getLogger(__name__ + ".setup_fallback")
+
+            # 记录详细的异常信息到控制台
+            fallback_logger.error(
+                f"CRITICAL: Failed to setup logger for intended path '{intended_log_path_for_error}'. "
+                f"Exception type: {type(e).__name__}, Message: {e}",
+                exc_info=True,  # 包含完整的 traceback
             )
-            self.logger.error(
-                f"Failed to setup logger at intended path '{intended_log_path}': {e}",
-                exc_info=True,
-            )
-            self.log_path = None  # 明确设置log_path为None，表示日志设置失败
+
+            # 设置为 None 以表示失败
+            self.logger = None
+            self.log_path = None
 
     def _check_word_table_header(self, table):
         """检查 Word 表格的表头是否符合预期（逻辑不变）。"""
