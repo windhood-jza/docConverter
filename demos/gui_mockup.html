@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>docConverter GUI Mockup</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+            background-color: #f4f4f4;
+            max-width: 600px;
+            margin: 20px auto;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            box-shadow: 2px 2px 10px rgba(0,0,0,0.1);
+        }
+        .container {
+            margin-bottom: 15px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #fff;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .path-display {
+            display: inline-block;
+            width: calc(100% - 150px); /* Adjust width as needed */
+            padding: 8px;
+            border: 1px solid #ccc;
+            background-color: #eee;
+            margin-right: 10px;
+            box-sizing: border-box;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            vertical-align: middle;
+            height: 36px; /* Match button height */
+            line-height: 1.5; /* Adjust line height */
+        }
+        button {
+            padding: 8px 15px;
+            cursor: pointer;
+            border: 1px solid #aaa;
+            border-radius: 4px;
+            background-color: #e7e7e7;
+            vertical-align: middle;
+            height: 36px; /* Match path display height */
+        }
+        button:hover {
+            background-color: #ddd;
+        }
+        .convert-button {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            font-size: 1.1em;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            margin-top: 10px;
+            margin-bottom: 15px;
+        }
+        .convert-button:hover {
+            background-color: #45a049;
+        }
+        .status-area {
+            padding: 10px;
+            border: 1px solid #ddd;
+            background-color: #f9f9f9;
+            margin-bottom: 15px;
+            min-height: 60px; /* Ensure space for messages */
+            line-height: 1.5;
+        }
+        .action-buttons button {
+            margin-right: 10px;
+            background-color: #008CBA;
+            color: white;
+            border: none;
+        }
+         .action-buttons button:hover {
+            background-color: #007ba7;
+        }
+        .action-buttons button.disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+         .action-buttons button.hidden {
+             display: none;
+         }
+        .file-selection {
+            display: flex; /* Use flexbox for alignment */
+            align-items: center; /* Align items vertically */
+        }
+        .file-selection label {
+            margin-bottom: 0; /* Remove bottom margin for flex alignment */
+            margin-right: 10px;
+        }
+        .path-input-group {
+             display: flex;
+             width: 100%;
+        }
+
+    </style>
+</head>
+<body>
+
+    <h1>Word 表格转换器</h1>
+
+    <div class="container">
+        <label for="word-path">源 Word 文档 (.docx):</label>
+        <div class="path-input-group">
+            <span id="word-path" class="path-display">[ 选择的 Word 文件路径将显示在这里 ]</span>
+            <button>选择 Word 文件...</button>
+        </div>
+    </div>
+
+    <div class="container">
+        <label for="csv-path">目标 CSV 文件:</label>
+         <div class="path-input-group">
+            <span id="csv-path" class="path-display">[ 目标 CSV 文件路径将显示在这里 ]</span>
+            <button>选择/指定 CSV...</button>
+        </div>
+    </div>
+
+    <button class="convert-button">开始转换</button>
+
+    <div class="container status-area">
+        <strong>状态:</strong> <span id="status-message">请选择文件...</span><br>
+        <span id="csv-path-info"></span><br>
+        <span id="log-path-info"></span>
+    </div>
+
+    <div class="container action-buttons">
+        <button id="open-csv" class="disabled">打开 CSV 文件</button>
+        <button id="open-folder" class="disabled">打开所在文件夹</button>
+        <button id="open-log" class="hidden disabled">打开错误日志</button>
+    </div>
+
+    <script>
+        // Basic interactivity simulation (optional, for better feel)
+        // This is NOT functional code for the actual app.
+        const wordPathDisplay = document.getElementById('word-path');
+        const csvPathDisplay = document.getElementById('csv-path');
+        const statusMessage = document.getElementById('status-message');
+        const csvPathInfo = document.getElementById('csv-path-info');
+        const logPathInfo = document.getElementById('log-path-info');
+        const convertButton = document.querySelector('.convert-button');
+        const openCsvButton = document.getElementById('open-csv');
+        const openFolderButton = document.getElementById('open-folder');
+        const openLogButton = document.getElementById('open-log');
+
+        // Simulate file selection
+        document.querySelectorAll('button')[0].onclick = () => {
+            wordPathDisplay.textContent = 'C:\示例\输入文档.docx';
+        };
+        document.querySelectorAll('button')[1].onclick = () => {
+            csvPathDisplay.textContent = 'C:\示例\输出结果.csv';
+        };
+
+        // Simulate conversion process
+        convertButton.onclick = () => {
+            if (!wordPathDisplay.textContent.startsWith('C:') || !csvPathDisplay.textContent.startsWith('C:')) {
+                statusMessage.textContent = '错误：请先选择 Word 和 CSV 文件。';
+                return;
+            }
+            
+            convertButton.textContent = '处理中...';
+            convertButton.disabled = true;
+            statusMessage.textContent = '处理中，请稍候...';
+            csvPathInfo.textContent = '';
+            logPathInfo.textContent = '';
+            openCsvButton.classList.add('disabled');
+            openFolderButton.classList.add('disabled');
+            openLogButton.classList.add('hidden', 'disabled');
+
+            // Simulate completion after a delay
+            setTimeout(() => {
+                convertButton.textContent = '开始转换';
+                convertButton.disabled = false;
+                // Simulate a result (change this to see different outcomes)
+                const success = true; 
+                const errors = 2;
+                const csvPath = csvPathDisplay.textContent;
+                const logPath = errors > 0 ? csvPath.replace('.csv', '_error.log') : null;
+
+                if (success) {
+                    statusMessage.textContent = `转换完成。成功: 148 行, 失败: ${errors} 行。`;
+                    csvPathInfo.textContent = `CSV 文件: ${csvPath}`;
+                    openCsvButton.classList.remove('disabled');
+                    openFolderButton.classList.remove('disabled');
+                    if (logPath) {
+                        logPathInfo.textContent = `日志文件: ${logPath}`;
+                        openLogButton.classList.remove('hidden', 'disabled');
+                    } else {
+                         openLogButton.classList.add('hidden', 'disabled');
+                    }
+                } else {
+                    statusMessage.textContent = '转换失败：无法读取 Word 文件。';
+                     openCsvButton.classList.add('disabled');
+                    openFolderButton.classList.add('disabled');
+                    openLogButton.classList.add('hidden', 'disabled');
+                }
+
+            }, 2000); // 2 second delay
+        };
+
+    </script>
+
+</body>
+</html> 
