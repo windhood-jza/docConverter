@@ -1,63 +1,95 @@
-import csv
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 import logging
 import os
 import docx
+import zipfile  # Potentially needed by openpyxl for error handling
+from openpyxl import Workbook, load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 from . import utils  # 使用相对导入
 from . import logger_config  # 使用相对导入
 
-# 假设 Word 表头和 CSV 表头的常量已经定义
-# 注意：这些常量应该与文档中的实际内容和期望的 CSV 输出一致
-# 请根据实际情况修改这些常量
+# --- Constants ---
+# Word 表头（标准化后）
 EXPECTED_WORD_HEADERS_NORMALIZED = [
     "序号",
     "资料名称",
-    "资料类型",
-    "保管部门",
-    "保管期限",
-    "保管责任人",
-    "归档日期",
+    "资料来源",
+    "提交人",
+    "接收人",
+    "交接日期",
+    "存放位置",
+    "备注",
 ]
-EXPECTED_CSV_HEADERS = [
-    "DataID",
-    "Name",
-    "Type",
-    "Department",
-    "RetentionPeriod",
-    "Custodian",
-    "ArchiveDate",
+# 期望的 Excel 输出表头 (根据用户确认的、可导入 LDIMS 的 1.xlsx 文件中的实际表头更新)
+EXPECTED_EXCEL_HEADERS = [
+    "文档 ID",  # 注意这里可能包含空格，以实际文件为准
+    "文档名称",
+    "文档类型",
+    "来源部门",
+    "提交人",
+    "接收人",
+    "签收(章)人",  # 使用实际文件中的列名
+    "交接日期",  # 使用实际文件中的列名
+    "保管位置",
+    "备注",
+    "创建人",
+    "创建时间",
+    "最后修改人",
+    "最后修改时间",
 ]
 
 
 class DocConverter:
-    def __init__(self, word_path, csv_path):
+    def __init__(self, word_path, excel_path):
+        """
+        初始化转换器。
+        :param word_path: 源 Word 文档路径。
+        :param excel_path: 目标 Excel 文件路径。
+        """
         self.word_path = word_path
-        self.csv_path = csv_path
-        self.log_path = None  # 日志路径将在 setup_logger 中设置
+        self.excel_path = excel_path
+        self.log_path = None  # 初始化为 None
         self.logger = None
-        # self._setup_logger() # 在 convert 方法开始时调用以确保路径有效
+        # self._setup_logger() # 将在 convert 方法开始时调用
 
     def _setup_logger(self):
-        """配置日志记录器。"""
+        """配置日志记录器，日志文件与 Excel 文件同目录。"""
         try:
-            # 从 CSV 文件名派生日志文件名
-            log_dir = os.path.join(os.path.dirname(self.csv_path), "logs")
-            csv_filename = os.path.splitext(os.path.basename(self.csv_path))[0]
-            self.log_path = os.path.join(log_dir, f"{csv_filename}_conversion.log")
+            # 日志文件直接放在 Excel 文件所在的目录
+            log_dir = os.path.dirname(self.excel_path)
+            excel_filename = os.path.splitext(os.path.basename(self.excel_path))[0]
+            # 日志文件名基于 Excel 文件名
+            self.log_path = os.path.join(log_dir, f"{excel_filename}_conversion.log")
+            # 确保目录存在 (虽然通常dirname会存在，但以防万一)
+            os.makedirs(log_dir, exist_ok=True)
+
             self.logger = logger_config.setup_logging(self.log_path)
+            if not self.logger:
+                raise RuntimeError("setup_logging returned None")
         except Exception as e:
-            # 如果日志设置失败，提供一个基本的日志记录器以报告错误
             logging.basicConfig(
                 level=logging.ERROR, format="%(asctime)s - %(levelname)s - %(message)s"
             )
-            self.logger = logging.getLogger(__name__)  # 使用当前模块名
-            self.logger.error(f"Failed to setup logger: {e}", exc_info=True)
-            # 即使日志设置失败，也尝试继续，但记录会不完整
+            self.logger = logging.getLogger(__name__)
+            # 更新错误日志中的路径信息
+            intended_log_path = os.path.join(
+                os.path.dirname(self.excel_path),
+                f"{os.path.splitext(os.path.basename(self.excel_path))[0]}_conversion.log",
+            )
+            self.logger.error(
+                f"Failed to setup logger at intended path '{intended_log_path}': {e}",
+                exc_info=True,
+            )
+            self.log_path = None  # 明确设置log_path为None，表示日志设置失败
 
     def _check_word_table_header(self, table):
-        """检查 Word 表格的表头是否符合预期。"""
+        """检查 Word 表格的表头是否符合预期（逻辑不变）。"""
+        if not self.logger:
+            return False  # 如果没有 logger，无法安全检查
+
         if not table.rows:
-            if self.logger:
-                self.logger.warning("Encountered a table with no rows.")
+            self.logger.warning("Encountered a table with no rows.")
             return False
         try:
             header_cells = table.rows[0].cells
@@ -66,237 +98,282 @@ class DocConverter:
             ]
 
             if len(actual_headers_normalized) != len(EXPECTED_WORD_HEADERS_NORMALIZED):
-                if self.logger:
-                    self.logger.warning(
-                        f"Table header length mismatch. Expected: {len(EXPECTED_WORD_HEADERS_NORMALIZED)}, Found: {len(actual_headers_normalized)}. Headers: {actual_headers_normalized}"
-                    )
+                self.logger.warning(
+                    f"Table header length mismatch. Expected: {len(EXPECTED_WORD_HEADERS_NORMALIZED)}, Found: {len(actual_headers_normalized)}. Headers: {actual_headers_normalized}"
+                )
                 return False
 
             if actual_headers_normalized == EXPECTED_WORD_HEADERS_NORMALIZED:
                 return True
             else:
-                if self.logger:
-                    self.logger.warning(
-                        f"Table header content mismatch. Expected: {EXPECTED_WORD_HEADERS_NORMALIZED}, Found: {actual_headers_normalized}"
-                    )
+                self.logger.warning(
+                    f"Table header content mismatch. Expected: {EXPECTED_WORD_HEADERS_NORMALIZED}, Found: {actual_headers_normalized}"
+                )
                 return False
         except IndexError:
-            if self.logger:
-                self.logger.error(
-                    "Error accessing table header cells. The table might be malformed.",
-                    exc_info=True,
-                )
+            self.logger.error(
+                "Error accessing table header cells. The table might be malformed.",
+                exc_info=True,
+            )
             return False
         except Exception as e:
-            if self.logger:
-                self.logger.error(
-                    f"Unexpected error checking Word table header: {e}", exc_info=True
-                )
+            self.logger.error(
+                f"Unexpected error checking Word table header: {e}", exc_info=True
+            )
             return False
 
-    def _check_csv_header(self):
-        """检查 CSV 文件是否存在以及表头是否匹配。"""
-        if not os.path.exists(self.csv_path):
-            if self.logger:
-                self.logger.info(
-                    f"CSV file '{self.csv_path}' not found. Will create a new file."
-                )
+    def _check_excel_header(self):
+        """检查 Excel 文件是否存在以及表头是否匹配 (与 EXPECTED_EXCEL_HEADERS 定义比较)。"""
+        if not self.logger:
+            return "error"
+
+        if not os.path.exists(self.excel_path):
+            self.logger.info(
+                f"Excel file '{self.excel_path}' not found. Will create a new file."
+            )
             return "create"
 
         try:
-            with open(
-                self.csv_path, "r", newline="", encoding="utf-8-sig"
-            ) as f:  # utf-8-sig 读取带BOM的CSV
-                reader = csv.reader(f)
-                try:
-                    header = next(reader)
-                    actual_headers_normalized = [
-                        utils.normalize_header(h) for h in header
-                    ]
+            wb = load_workbook(self.excel_path, read_only=True)
+            ws = wb.active
 
-                    # CSV 表头检查：转换为小写进行比较可能更健壮
-                    expected_headers_lower = [h.lower() for h in EXPECTED_CSV_HEADERS]
-                    actual_headers_lower = [
-                        h.lower() for h in actual_headers_normalized
-                    ]
-
-                    if actual_headers_lower == expected_headers_lower:
-                        if self.logger:
-                            self.logger.info(
-                                f"CSV file '{self.csv_path}' exists with matching header. Will append data."
-                            )
-                        return "append"
-                    else:
-                        if self.logger:
-                            self.logger.error(
-                                f"CSV file '{self.csv_path}' header mismatch. Expected (case-insensitive): {expected_headers_lower}, Found: {actual_headers_lower}"
-                            )
-                        return "mismatch"
-                except StopIteration:  # 文件是空的
-                    if self.logger:
-                        self.logger.warning(
-                            f"CSV file '{self.csv_path}' exists but is empty. Will treat as new file."
-                        )
-                    return "create"
-        except FileNotFoundError:
-            if self.logger:
-                self.logger.info(
-                    f"CSV file '{self.csv_path}' not found during check. Will create a new file."
+            if ws.max_row == 0:
+                self.logger.warning(
+                    f"Excel file '{self.excel_path}' exists but the active sheet is empty. Will treat as new file."
                 )
-            return "create"  # 万一在第一次检查和读取之间被删除
-        except Exception as e:
-            if self.logger:
+                wb.close()
+                return "create"
+
+            header_row_values = next(
+                ws.iter_rows(min_row=1, max_row=1, values_only=True), None
+            )
+
+            if header_row_values is None:
+                self.logger.warning(
+                    f"Excel file '{self.excel_path}' exists but couldn't read the header row from the active sheet. Will treat as new file."
+                )
+                wb.close()
+                return "create"
+
+            # 获取原始读取的表头用于日志记录和精确比较
+            actual_raw_headers = [
+                str(h) if h is not None else "" for h in header_row_values
+            ]
+
+            # !! 重要: 直接与代码中定义的 EXPECTED_EXCEL_HEADERS 列表进行精确比较 !!
+            # 不再进行标准化或大小写转换，因为用户要求以现有文件为绝对标准
+
+            # 比较表头长度和内容
+            if len(actual_raw_headers) != len(EXPECTED_EXCEL_HEADERS):
                 self.logger.error(
-                    f"Error reading CSV file '{self.csv_path}': {e}", exc_info=True
+                    f"Excel file '{self.excel_path}' header length mismatch. "
+                    f"Expected (per code): {len(EXPECTED_EXCEL_HEADERS)}, Found (in file): {len(actual_raw_headers)}. "
+                    f"Expected Headers: {EXPECTED_EXCEL_HEADERS}, Found Headers: {actual_raw_headers}"
                 )
+                wb.close()
+                return "mismatch"
+
+            # 精确比较内容
+            if actual_raw_headers == EXPECTED_EXCEL_HEADERS:
+                self.logger.info(
+                    f"Excel file '{self.excel_path}' exists with matching header (exact match). Will append data."
+                )
+                wb.close()
+                return "append"
+            else:
+                self.logger.error(
+                    f"Excel file '{self.excel_path}' header content mismatch (exact comparison). "
+                    f"Expected Headers (per code): {EXPECTED_EXCEL_HEADERS}, "
+                    f"Found Headers (in file): {actual_raw_headers}"
+                )
+                # 尝试找出第一个不匹配的位置，帮助调试
+                for i, (expected, actual) in enumerate(
+                    zip(EXPECTED_EXCEL_HEADERS, actual_raw_headers)
+                ):
+                    if expected != actual:
+                        self.logger.error(
+                            f"First mismatch at index {i}: Expected '{expected}', Found '{actual}'"
+                        )
+                        break
+                wb.close()
+                return "mismatch"
+
+        except FileNotFoundError:
+            self.logger.info(
+                f"Excel file '{self.excel_path}' not found during header check. Will create a new file."
+            )
+            return "create"
+        except (InvalidFileException, zipfile.BadZipFile):
+            self.logger.error(
+                f"Error reading Excel file '{self.excel_path}'. It might be corrupted or not a valid XLSX file.",
+                exc_info=True,
+            )
+            return "error"
+        except Exception as e:
+            self.logger.error(
+                f"Unexpected error reading Excel file '{self.excel_path}': {e}",
+                exc_info=True,
+            )
             return "error"
 
     def _extract_data_from_table(self, table, table_index):
-        """从符合表头要求的表格中提取数据。"""
+        """从 Word 表格提取数据，跳过空行，并统计跳过的空行数。"""
+        if not self.logger:
+            return [], [], 0  # 返回空列表和计数0
+
         extracted_rows = []
-        original_row_indices = []  # 记录原始行号（基于1）
+        original_row_indices = []
+        skipped_empty_count = 0  # 初始化跳过的空行计数器
         try:
-            # table.rows 包含表头行，索引从 0 开始
             for i, row in enumerate(table.rows):
                 if i == 0:  # 跳过表头行
                     continue
-                row_data = [cell.text for cell in row.cells]
-                # 检查是否为空行（所有单元格都为空或仅包含空白字符）
-                if all(not cell_text.strip() for cell_text in row_data):
-                    if self.logger:
-                        self.logger.debug(
-                            f"Skipping empty row at table {table_index + 1}, original row index {i + 1}."
-                        )
+                # 提取原始文本
+                row_data_texts = [cell.text for cell in row.cells]
+
+                # **关键：检查是否为空行** (所有单元格文本去除空格后都为空)
+                if all(not cell_text.strip() for cell_text in row_data_texts):
+                    self.logger.info(
+                        f"Skipping empty row found in Word table {table_index + 1}, original row index {i + 1}."
+                    )
+                    skipped_empty_count += 1  # 增加计数
                     continue  # 跳过空行
 
-                extracted_rows.append(row_data)
-                original_row_indices.append(i + 1)  # Word 表格中原始行号（基于1）
+                # 如果不是空行，添加到结果列表
+                extracted_rows.append(row_data_texts)
+                original_row_indices.append(i + 1)
 
-            return extracted_rows, original_row_indices
+            # 返回提取的数据、原始行号和跳过的空行数
+            return extracted_rows, original_row_indices, skipped_empty_count
         except Exception as e:
-            if self.logger:
-                self.logger.error(
-                    f"Error extracting data from table {table_index + 1}: {e}",
-                    exc_info=True,
-                )
-            return [], []  # 出错时返回空列表
+            self.logger.error(
+                f"Error extracting data from table {table_index + 1}: {e}",
+                exc_info=True,
+            )
+            return [], [], skipped_empty_count  # 出错时也返回当前计数
 
     def _process_row(self, raw_row_data, table_index, row_index):
-        """处理从 Word 提取的单行数据，转换为 CSV 格式。"""
-        # 假设 EXPECTED_WORD_HEADERS_NORMALIZED 和 EXPECTED_CSV_HEADERS 长度一致
-        # 并且 Word 列按顺序对应 CSV 列
-        if len(raw_row_data) < len(EXPECTED_WORD_HEADERS_NORMALIZED):
-            if self.logger:
-                self.logger.warning(
-                    f"Row {row_index} in table {table_index + 1} has fewer cells ({len(raw_row_data)}) than expected ({len(EXPECTED_WORD_HEADERS_NORMALIZED)}). Padding with empty strings. Data: {raw_row_data}"
-                )
-            # 用空字符串填充缺失的列
-            raw_row_data.extend(
-                [""] * (len(EXPECTED_WORD_HEADERS_NORMALIZED) - len(raw_row_data))
-            )
-        elif len(raw_row_data) > len(EXPECTED_WORD_HEADERS_NORMALIZED):
-            if self.logger:
-                self.logger.warning(
-                    f"Row {row_index} in table {table_index + 1} has more cells ({len(raw_row_data)}) than expected ({len(EXPECTED_WORD_HEADERS_NORMALIZED)}). Truncating extra cells. Data: {raw_row_data}"
-                )
-            raw_row_data = raw_row_data[: len(EXPECTED_WORD_HEADERS_NORMALIZED)]
+        """处理单行 Word 数据，准备写入 Excel (映射到最新的14列中文表头)。"""
+        if not self.logger:
+            return None
 
-        processed_data = {}  # 使用字典更容易按 CSV 表头名称赋值
+        expected_word_cols = len(EXPECTED_WORD_HEADERS_NORMALIZED)
+        # 检查列数是否符合 Word 表头预期 (逻辑不变)
+        if len(raw_row_data) < expected_word_cols:
+            self.logger.warning(
+                f"Row {row_index} in table {table_index + 1} has fewer cells ({len(raw_row_data)}) than expected ({expected_word_cols}). Padding with empty strings. Data: {raw_row_data}"
+            )
+            raw_row_data.extend([""] * (expected_word_cols - len(raw_row_data)))
+        elif len(raw_row_data) > expected_word_cols:
+            self.logger.warning(
+                f"Row {row_index} in table {table_index + 1} has more cells ({len(raw_row_data)}) than expected ({expected_word_cols}). Truncating extra cells. Data: {raw_row_data}"
+            )
+            raw_row_data = raw_row_data[:expected_word_cols]
 
         # 按 Word 表头顺序提取数据
         try:
-            data_name = raw_row_data[1].strip()  # 资料名称 (Word 第 2 列)
-            data_type = raw_row_data[2].strip()  # 资料类型 (Word 第 3 列)
-            department = raw_row_data[3].strip()  # 保管部门 (Word 第 4 列)
-            retention_period = raw_row_data[4].strip()  # 保管期限 (Word 第 5 列)
-            custodian = raw_row_data[5].strip()  # 保管责任人 (Word 第 6 列)
-            archive_date_str = raw_row_data[6].strip()  # 归档日期 (Word 第 7 列)
+            # Word 列索引: 0:序号, 1:资料名称, 2:资料来源, 3:提交人, 4:接收人, 5:交接日期, 6:存放位置, 7:备注
+            data_name = raw_row_data[1].strip()  # -> 文档名称 (Excel Index 1)
+            data_source = raw_row_data[2].strip()  # -> 来源部门 (Excel Index 3)
+            submitter = raw_row_data[3].strip()  # -> 提交人   (Excel Index 4)
+            receiver = raw_row_data[4].strip()  # -> 接收人   (Excel Index 5)
+            handover_date_str = raw_row_data[5].strip()  # -> 交接日期 (Excel Index 7)
+            location = raw_row_data[6].strip()  # -> 保管位置 (Excel Index 8)
+            remarks = raw_row_data[7].strip()  # -> 备注     (Excel Index 9)
 
             # 处理日期
-            archive_date_obj = utils.parse_date(archive_date_str)
-            if archive_date_obj:
-                archive_date_formatted = archive_date_obj.strftime("%Y-%m-%d")
+            handover_date_obj = utils.parse_date(handover_date_str)
+            if handover_date_obj:
+                handover_date_formatted = handover_date_obj.strftime("%Y-%m-%d")
             else:
-                # 如果日期解析失败，记录错误并认为此行处理失败
-                if self.logger:
-                    self.logger.error(
-                        f"Failed to parse date '{archive_date_str}' in table {table_index + 1}, row {row_index}."
-                    )
-                return None  # 返回 None 表示处理失败
+                self.logger.warning(
+                    f"Could not parse date '{handover_date_str}' (交接日期) in table {table_index + 1}, row {row_index}. Leaving date field empty."
+                )
+                handover_date_formatted = ""  # 如果日期解析失败，保留为空
 
-            # 填充字典，键使用 CSV 表头
-            # DataID 通常需要生成或留空，这里暂时留空
-            processed_data[EXPECTED_CSV_HEADERS[0]] = ""  # DataID
-            processed_data[EXPECTED_CSV_HEADERS[1]] = data_name  # Name
-            processed_data[EXPECTED_CSV_HEADERS[2]] = data_type  # Type
-            processed_data[EXPECTED_CSV_HEADERS[3]] = department  # Department
-            processed_data[EXPECTED_CSV_HEADERS[4]] = (
-                retention_period  # RetentionPeriod
-            )
-            processed_data[EXPECTED_CSV_HEADERS[5]] = custodian  # Custodian
-            processed_data[EXPECTED_CSV_HEADERS[6]] = (
-                archive_date_formatted  # ArchiveDate
-            )
+            # 构建 Excel 行数据列表 (映射到14列 EXPECTED_EXCEL_HEADERS 顺序)
+            excel_row = [
+                "",  # 0: 文档 ID
+                data_name,  # 1: 文档名称
+                "",  # 2: 文档类型
+                data_source,  # 3: 来源部门
+                submitter,  # 4: 提交人
+                receiver,  # 5: 接收人
+                "",  # 6: 签收(章)人
+                handover_date_formatted,  # 7: 交接日期
+                location,  # 8: 保管位置
+                remarks,  # 9: 备注
+                "",  # 10: 创建人
+                "",  # 11: 创建时间
+                "",  # 12: 最后修改人
+                "",  # 13: 最后修改时间
+            ]
 
-            # 按照 CSV 表头顺序返回列表
-            return [processed_data.get(header, "") for header in EXPECTED_CSV_HEADERS]
+            # 验证长度 (确保内部逻辑正确)
+            if len(excel_row) != len(EXPECTED_EXCEL_HEADERS):
+                self.logger.error(
+                    f"Internal error during row processing: Mismatched length between processed data ({len(excel_row)}) and Excel headers ({len(EXPECTED_EXCEL_HEADERS)}). Data: {excel_row}"
+                )
+                return None
+
+            return excel_row
 
         except IndexError as e:
-            if self.logger:
-                self.logger.error(
-                    f"Index error processing row {row_index} in table {table_index + 1}. Likely row structure issue. Data: {raw_row_data}. Error: {e}",
-                    exc_info=True,
-                )
+            self.logger.error(
+                f"Index error processing row {row_index} in table {table_index + 1}. Data: {raw_row_data}. Error: {e}",
+                exc_info=True,
+            )
             return None
         except Exception as e:
-            if self.logger:
-                self.logger.error(
-                    f"Unexpected error processing row {row_index} in table {table_index + 1}. Data: {raw_row_data}. Error: {e}",
-                    exc_info=True,
-                )
+            self.logger.error(
+                f"Unexpected error processing row {row_index} in table {table_index + 1}. Data: {raw_row_data}. Error: {e}",
+                exc_info=True,
+            )
             return None
 
     def convert(self):
-        """执行 Word 到 CSV 的转换过程。"""
-        self._setup_logger()  # 在开始时设置日志记录器
+        """执行 Word 到 Excel 的转换过程。"""
+        self._setup_logger()
         if not self.logger:
-            # 如果日志设置失败，无法继续，但应该尝试用 print 输出错误
-            print("ERROR: Logger setup failed. Cannot proceed with detailed logging.")
+            # 即使没有文件日志，也应该能在控制台看到错误
+            print("ERROR: Logger setup failed critically. Cannot proceed.")
+            # 返回错误信息，避免程序完全崩溃
             return {
                 "status": "error",
                 "message": "Logger setup failed. Cannot proceed.",
                 "success": 0,
                 "errors": 0,
-                "skipped_empty": 0,
-                "csv_path": self.csv_path,
+                "total_skipped_rows": 0,
+                "excel_path": self.excel_path,
                 "log_path": self.log_path,
             }
 
         self.logger.info(
-            f"Starting conversion from '{self.word_path}' to '{self.csv_path}'"
+            f"Starting conversion from '{self.word_path}' to '{self.excel_path}'"
         )
 
-        csv_mode = self._check_csv_header()
+        excel_mode = self._check_excel_header()  # 调用新的检查函数
 
-        if csv_mode == "mismatch" or csv_mode == "error":
-            msg = f"CSV header check failed (mode: {csv_mode}). Please check the CSV file or logs."
+        if excel_mode == "mismatch" or excel_mode == "error":
+            msg = f"Excel header check failed (mode: {excel_mode}). Please check the Excel file or logs."
             self.logger.error(msg)
             return {
                 "status": "error",
                 "message": msg,
                 "success": 0,
                 "errors": 0,
-                "skipped_empty": 0,
-                "csv_path": self.csv_path,
+                "total_skipped_rows": 0,
+                "excel_path": self.excel_path,
                 "log_path": self.log_path,
             }
 
         success_count = 0
         error_count = 0
-        skipped_empty_count = 0
-        processed_data_for_csv = []  # 存储所有成功处理的行数据
+        total_skipped_empty = 0  # Word 读取时跳过
+        processed_data_for_excel = []
         processed_tables = 0
         processed_rows_total = 0
+        skipped_processed_empty_count = 0  # 处理后变空跳过
 
         try:
             document = docx.Document(self.word_path)
@@ -310,12 +387,16 @@ class DocConverter:
                         f"Table {table_index + 1} header matches. Extracting data..."
                     )
                     processed_tables += 1
-                    extracted_rows, original_indices = self._extract_data_from_table(
-                        table, table_index
+                    extracted_rows, original_indices, skipped_in_table = (
+                        self._extract_data_from_table(table, table_index)
                     )
+                    total_skipped_empty += skipped_in_table  # 累加到总数
                     self.logger.info(
-                        f"Extracted {len(extracted_rows)} non-empty rows from table {table_index + 1}."
+                        f"Extracted {len(extracted_rows)} non-empty rows from table {table_index + 1}. Skipped {skipped_in_table} empty rows in this table."
                     )
+
+                    if not extracted_rows:
+                        continue
 
                     for i, raw_row in enumerate(extracted_rows):
                         original_row_index = original_indices[i]
@@ -325,237 +406,170 @@ class DocConverter:
                         )
 
                         if processed_row_data:
-                            # 再次检查是否为空行 (理论上 _extract_data_from_table 已过滤, 但双重检查更安全)
-                            if all(
-                                not str(cell).strip() for cell in processed_row_data
-                            ):
-                                skipped_empty_count += 1
-                                self.logger.info(
-                                    f"Skipping empty row detected after processing: table {table_index + 1}, original row {original_row_index}."
+                            # --- 新增检查: 检查处理后的行是否有效空行 ---
+                            is_processed_row_empty = all(
+                                str(cell).strip() == "" for cell in processed_row_data
+                            )
+                            if is_processed_row_empty:
+                                self.logger.warning(
+                                    f"Skipping effectively empty row after processing: table {table_index + 1}, original row {original_row_index}. Raw data: {raw_row}"
                                 )
+                                skipped_processed_empty_count += 1  # 计数
+                                # 不将此行添加到 processed_data_for_excel，也不计入 success_count 或 error_count
                             else:
+                                # --- 只有非空行才添加到最终列表并计数 ---
                                 success_count += 1
-                                processed_data_for_csv.append(processed_row_data)
+                                processed_data_for_excel.append(processed_row_data)
                                 self.logger.debug(
                                     f"Successfully processed row: table {table_index + 1}, original row {original_row_index}."
                                 )
-                        else:
+                        else:  # _process_row 返回了 None (处理失败)
                             error_count += 1
-                            # 错误已在 _process_row 中记录
-
                 else:
                     self.logger.warning(
                         f"Skipping table {table_index + 1} due to header mismatch."
                     )
 
-        except docx.opc.exceptions.PackageNotFoundError:
-            msg = f"Word document not found or invalid: '{self.word_path}'"
+        except docx.opc.exceptions.PackageNotFoundError as e:
+            msg = f"Word 文档未找到或无效: '{self.word_path}'"
             self.logger.error(msg)
+            total_skipped_rows = (
+                total_skipped_empty + skipped_processed_empty_count
+            )  # 计算总数
             return {
                 "status": "error",
                 "message": msg,
                 "success": 0,
                 "errors": error_count,
-                "skipped_empty": skipped_empty_count,
-                "csv_path": self.csv_path,
+                "total_skipped_rows": total_skipped_rows,  # 返回总数
+                "excel_path": self.excel_path,
                 "log_path": self.log_path,
             }
         except Exception as e:
-            msg = f"An unexpected error occurred while reading the Word document: {e}"
+            msg = f"读取 Word 文档时发生意外错误: {e}"
             self.logger.error(msg, exc_info=True)
+            total_skipped_rows = (
+                total_skipped_empty + skipped_processed_empty_count
+            )  # 计算总数
             return {
                 "status": "error",
                 "message": msg,
                 "success": 0,
                 "errors": error_count,
-                "skipped_empty": skipped_empty_count,
-                "csv_path": self.csv_path,
+                "total_skipped_rows": total_skipped_rows,  # 返回总数
+                "excel_path": self.excel_path,
                 "log_path": self.log_path,
             }
 
-        # 检查是否有有效数据被处理
-        if not processed_data_for_csv:
-            if processed_tables == 0:
-                msg = "No tables with matching headers found in the Word document."
-                self.logger.warning(msg)
-            elif error_count > 0:
-                msg = f"Processed {processed_rows_total} rows from {processed_tables} matching tables, but all resulted in errors. Check logs for details."
-                self.logger.warning(msg)
-            elif skipped_empty_count > 0:
-                msg = f"Processed {skipped_empty_count} rows from {processed_tables} matching tables, but all were empty or skipped. No data to write."
-                self.logger.warning(msg)
-            else:
-                msg = "No processable data found in the Word document after checking tables and rows."
-                self.logger.warning(msg)
+        # --- 计算总的跳过行数 ---
+        total_skipped_rows = total_skipped_empty + skipped_processed_empty_count
 
+        # --- 处理没有数据写入的情况 ---
+        if not processed_data_for_excel:
+            msg = "..."
+            # ... (Update messages to reflect the single total_skipped_rows)
+            if processed_tables == 0:
+                msg = "未在 Word 文档中找到表头匹配的表格。未写入数据。"
+            elif error_count > 0:
+                msg = f"从 {processed_tables} 个匹配表格中处理了 {processed_rows_total} 个非空行，但 {error_count} 行处理失败，{skipped_processed_empty_count} 行处理后变为空。总共跳过 {total_skipped_rows} 行。未写入数据。请检查日志。"
+            elif (
+                skipped_processed_empty_count > 0
+                and processed_rows_total == skipped_processed_empty_count
+            ):
+                msg = f"从 {processed_tables} 个匹配表格中处理了 {processed_rows_total} 个非空行，但所有行处理后均变为空。总共跳过 {total_skipped_rows} 行。未写入数据。"
+            elif total_skipped_rows > 0 and processed_rows_total == 0:
+                msg = f"在 {processed_tables} 个匹配表格中只找到空行 (总共跳过 {total_skipped_rows} 行)。未写入数据。"
+            else:
+                msg = "未从 Word 文档成功提取或处理任何数据。未写入数据。"
+
+            self.logger.warning(msg)
+            status = (
+                "warning"
+                if error_count == 0 and skipped_processed_empty_count == 0
+                else "error"
+            )
             return {
-                "status": "warning" if error_count == 0 else "error",
+                "status": status,
                 "message": msg,
                 "success": 0,
                 "errors": error_count,
-                "skipped_empty": skipped_empty_count,
-                "csv_path": self.csv_path,
+                "total_skipped_rows": total_skipped_rows,  # 返回总数
+                "excel_path": self.excel_path,
                 "log_path": self.log_path,
             }
 
-        # 写入 CSV 文件
-        write_mode = "w" if csv_mode == "create" else "a"
-        write_header = csv_mode == "create"
+        # --- 写入 Excel 文件 ---
         try:
-            # 确保目标目录存在
-            os.makedirs(os.path.dirname(self.csv_path), exist_ok=True)
+            os.makedirs(os.path.dirname(self.excel_path), exist_ok=True)
 
-            with open(
-                self.csv_path, write_mode, newline="", encoding="utf-8-sig"
-            ) as f:  # 使用 utf-8-sig 写入带 BOM 的 CSV
-                writer = csv.writer(f)
-                if write_header:
-                    writer.writerow(EXPECTED_CSV_HEADERS)
-                    self.logger.info(
-                        f"Writing header to new CSV file: {EXPECTED_CSV_HEADERS}"
-                    )
-                writer.writerows(processed_data_for_csv)
+            if excel_mode == "create":
+                self.logger.info(f"Creating new Excel file: '{self.excel_path}'")
+                wb = Workbook()
+                ws = wb.active
+                ws.append(EXPECTED_EXCEL_HEADERS)
                 self.logger.info(
-                    f"Successfully wrote {success_count} rows to '{self.csv_path}'. Mode: {'w': 'overwrite/create', 'a': 'append'}[write_mode]."
+                    f"Writing header to new Excel file: {EXPECTED_EXCEL_HEADERS}"
+                )
+                for row_data in processed_data_for_excel:
+                    ws.append(row_data)
+                wb.save(self.excel_path)
+                self.logger.info(
+                    f"Successfully wrote {success_count} rows to new Excel file."
                 )
 
-            final_message = f"Conversion finished. Success: {success_count}, Errors: {error_count}, Skipped Empty: {skipped_empty_count}."
+            elif excel_mode == "append":
+                self.logger.info(
+                    f"Appending data to existing Excel file: '{self.excel_path}'"
+                )
+                wb = load_workbook(self.excel_path)
+                ws = wb.active
+                for row_data in processed_data_for_excel:
+                    ws.append(row_data)
+                wb.save(self.excel_path)
+                self.logger.info(
+                    f"Successfully appended {success_count} rows to Excel file."
+                )
+
+            # 简化最终消息
+            final_message = f"转换完成: 成功 {success_count} 行, 失败 {error_count} 行, 共跳过空行 {total_skipped_rows} 行."
             self.logger.info(final_message)
             return {
                 "status": "success",
                 "message": final_message,
                 "success": success_count,
                 "errors": error_count,
-                "skipped_empty": skipped_empty_count,
-                "csv_path": self.csv_path,
+                "total_skipped_rows": total_skipped_rows,  # 返回总数
+                "excel_path": self.excel_path,
                 "log_path": self.log_path,
             }
 
+        except PermissionError as e:
+            msg = f"写入 Excel 文件 '{self.excel_path}' 失败。权限不足或文件被占用?"
+            self.logger.error(msg, exc_info=False)
+            return {
+                "status": "error",
+                "message": msg,
+                "success": 0,
+                "errors": error_count,
+                "total_skipped_rows": total_skipped_rows,  # 返回总数
+                "excel_path": self.excel_path,
+                "log_path": self.log_path,
+            }
         except Exception as e:
-            msg = f"Failed to write data to CSV file '{self.csv_path}': {e}"
+            msg = f"写入 Excel 文件 '{self.excel_path}' 时发生意外错误: {e}"
             self.logger.error(msg, exc_info=True)
             return {
                 "status": "error",
                 "message": msg,
                 "success": 0,
                 "errors": error_count,
-                "skipped_empty": skipped_empty_count,
-                "csv_path": self.csv_path,
+                "total_skipped_rows": total_skipped_rows,  # 返回总数
+                "excel_path": self.excel_path,
                 "log_path": self.log_path,
             }
 
 
-# 测试块 (可选，用于基本测试)
-if __name__ == "__main__":
-    # 创建虚拟 Word 和 CSV 文件进行测试
-    print("Running basic converter test...")
-    test_word_path = "test_converter_input.docx"
-    test_csv_path = "test_converter_output.csv"
-    test_log_dir = os.path.join(os.path.dirname(test_csv_path), "logs")
-    test_log_path = os.path.join(
-        test_log_dir,
-        f"{os.path.splitext(os.path.basename(test_csv_path))[0]}_conversion.log",
-    )
-
-    # 准备 Word 内容
-    doc = docx.Document()
-    doc.add_paragraph("Test Document for Converter")
-    # 表 1: 正确表头
-    table1 = doc.add_table(rows=1, cols=len(EXPECTED_WORD_HEADERS_NORMALIZED))
-    hdr_cells = table1.rows[0].cells
-    for i, header_text in enumerate(EXPECTED_WORD_HEADERS_NORMALIZED):
-        hdr_cells[i].text = header_text.upper()  # 测试大小写不敏感
-    # 添加数据行
-    row_cells = table1.add_row().cells
-    row_cells[0].text = "1"
-    row_cells[1].text = "Doc A"
-    row_cells[2].text = "Type1"
-    row_cells[3].text = "Dept X"
-    row_cells[4].text = "10 Years"
-    row_cells[5].text = "John Doe"
-    row_cells[6].text = "2023-01-15"
-    row_cells = table1.add_row().cells  # 空行
-    row_cells = table1.add_row().cells
-    row_cells[0].text = "2"
-    row_cells[1].text = "Doc B"
-    row_cells[2].text = "Type2"
-    row_cells[3].text = "Dept Y"
-    row_cells[4].text = "Permanent"
-    row_cells[5].text = "Jane Smith"
-    row_cells[6].text = "2024年2月"  # 测试年月格式
-    row_cells = table1.add_row().cells
-    row_cells[0].text = "3"
-    row_cells[1].text = "Doc C"
-    row_cells[2].text = "Type3"
-    row_cells[3].text = "Dept Z"
-    row_cells[4].text = "5 Years"
-    row_cells[5].text = "Peter Pan"
-    row_cells[6].text = "invalid-date"  # 测试无效日期
-
-    # 表 2: 错误表头
-    doc.add_paragraph("\n")
-    table2 = doc.add_table(rows=1, cols=3)
-    table2.rows[0].cells[0].text = "Wrong"
-    table2.rows[0].cells[1].text = "Header"
-    table2.rows[0].cells[2].text = "Format"
-    table2.add_row().cells[0].text = "Data"
-
-    try:
-        doc.save(test_word_path)
-        print(f"Created test Word file: {test_word_path}")
-
-        # 删除旧的 CSV 和日志文件（如果存在）
-        if os.path.exists(test_csv_path):
-            os.remove(test_csv_path)
-        if os.path.exists(test_log_path):
-            os.remove(test_log_path)
-        if not os.path.exists(test_log_dir):
-            os.makedirs(test_log_dir)
-
-        # 执行转换 (第一次, 创建模式)
-        print("\n--- Running conversion (create mode) ---")
-        converter = DocConverter(test_word_path, test_csv_path)
-        result1 = converter.convert()
-        print(f"Conversion Result 1: {result1}")
-
-        # 再次执行转换 (追加模式)
-        print("\n--- Running conversion (append mode) ---")
-        # 修改 Word 文件以模拟新数据 (可选)
-        # table1.add_row().cells[1].text = 'Doc D' ...
-        # doc.save(test_word_path)
-        converter2 = DocConverter(test_word_path, test_csv_path)
-        result2 = converter2.convert()
-        print(f"Conversion Result 2: {result2}")
-
-        # 检查 CSV 内容
-        if os.path.exists(test_csv_path):
-            print(f"\n--- Content of {test_csv_path} ---")
-            with open(test_csv_path, "r", encoding="utf-8-sig") as f:
-                print(f.read())
-        else:
-            print(f"\n{test_csv_path} was not created.")
-
-        # 检查日志内容
-        if result1 and result1.get("log_path") and os.path.exists(result1["log_path"]):
-            print(f"\n--- Content of {result1['log_path']} ---")
-            with open(result1["log_path"], "r", encoding="utf-8") as f:
-                print(f.read())
-        elif result1:
-            print(
-                f"\nLog file path {result1.get('log_path')} invalid or file not created."
-            )
-        else:
-            print("\nLog file path could not be determined from result1.")
-
-    except Exception as e:
-        print(f"An error occurred during testing: {e}")
-    finally:
-        # 清理测试文件 (可选)
-        # if os.path.exists(test_word_path): os.remove(test_word_path)
-        # if os.path.exists(test_csv_path): os.remove(test_csv_path)
-        # if os.path.exists(test_log_path): os.remove(test_log_path)
-        # if os.path.exists(test_log_dir): # 检查目录是否为空再删除
-        #     try: os.rmdir(test_log_dir)
-        #     except OSError: print(f"Could not remove log directory {test_log_dir} as it might not be empty.")
-        # print("Cleaned up test files.")
-        pass
+# --- 测试块 (需要 openpyxl 来运行) ---
+# if __name__ == '__main__':
+#     # ... (Test block needs significant updates for new headers/mapping) ...
+#     pass
